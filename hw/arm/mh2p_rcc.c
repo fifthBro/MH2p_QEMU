@@ -635,6 +635,7 @@ typedef struct RCCDCAN {
     RCCDCANMessage interface[2], messages[128];
     uint32_t command[2], interrupt_mux[4];
     qemu_irq irq[2];
+    unsigned bus;
 } RCCDCAN;
 
 static const hwaddr rcc_dcan_clocks[] = { 0x4ae07888, 0x4a0098f0 };
@@ -2986,6 +2987,7 @@ static ssize_t rcc_dcan_receive(CanBusClientState *client,
 {
     RCCDCAN *s = container_of(client, RCCDCAN, bus_client);
     bool acknowledged = false;
+    unsigned hit;
 
     for (size_t f = 0; f < count; f++) {
         const qemu_can_frame *frame = &frames[f];
@@ -3011,6 +3013,7 @@ static ssize_t rcc_dcan_receive(CanBusClientState *client,
         } else {
             arbitration = (arbitration & QEMU_CAN_SFF_MASK) << 18;
         }
+        hit = 0;
         for (unsigned i = 0; i < ARRAY_SIZE(s->messages); i++) {
             RCCDCANMessage *message = &s->messages[i];
             uint32_t mask = BIT(30) | BIT(29) | QEMU_CAN_EFF_MASK;
@@ -3052,8 +3055,12 @@ static ssize_t rcc_dcan_receive(CanBusClientState *client,
             if (message->control & BIT(10)) {
                 message->control |= BIT(13);
             }
+            hit = i + 1;
             break;
         }
+        trace_mh2p_rcc_dcan_rx(s->bus, frame->can_id & QEMU_CAN_EFF_MASK,
+                               !!(frame->can_id & QEMU_CAN_EFF_FLAG),
+                               frame->can_dlc, hit);
     }
     rcc_dcan_interrupts(s);
     return acknowledged;
@@ -3168,6 +3175,17 @@ static bool rcc_dcan_transfer(RCCDCAN *s, unsigned index, uint32_t command)
         (updated_message.control & BIT(8)) &&
         (s->clock_control & BIT(24))) {
         return false; /* SYS_CLK2 timing is not modeled. */
+    }
+    if (write && (command & (BIT(22) | BIT(21) | BIT(20)))) {
+        uint32_t arb = updated_message.arbitration;
+        bool ext = arb & BIT(30);
+
+        trace_mh2p_rcc_dcan_object(s->bus, number, !!(arb & BIT(31)),
+            !!(arb & BIT(29)), ext,
+            ext ? arb & QEMU_CAN_EFF_MASK : (arb >> 18) & QEMU_CAN_SFF_MASK,
+            ext ? updated_message.mask & QEMU_CAN_EFF_MASK :
+                  (updated_message.mask >> 18) & QEMU_CAN_SFF_MASK,
+            !!(updated_message.control & BIT(12)));
     }
     *message = updated_message;
     *interface = updated_interface;
@@ -3317,6 +3335,7 @@ static MemTxResult rcc_dcan_write(void *opaque, hwaddr offset,
          * operations require their actual engines, not a ready-bit fixture.
          * WUBA can be configured but an unattached bus cannot cause a wakeup.
          */
+        trace_mh2p_rcc_dcan_ctl(s->bus, value, s->control, s->clock_control);
         if ((value & ~0x202be6fU) || (value & 0x3c00) != 0x1400) {
             goto unsupported;
         }
@@ -6783,6 +6802,7 @@ static void rcc_init(MachineState *ms)
         s->dcan[i].transmit_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
                                                 rcc_dcan_transmit, &s->dcan[i]);
         s->dcan[i].bus_client.info = &rcc_dcan_bus_info;
+        s->dcan[i].bus = i;
         if (s->canbus[i]) {
             can_bus_insert_client(s->canbus[i], &s->dcan[i].bus_client);
         }
