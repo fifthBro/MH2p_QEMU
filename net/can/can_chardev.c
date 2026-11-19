@@ -6,6 +6,7 @@
 #include "qemu/bswap.h"
 #include "qemu/error-report.h"
 #include "qemu/module.h"
+#include "qemu/timer.h"
 #include "qapi/error.h"
 #include "chardev/char-fe.h"
 #include "net/can_host.h"
@@ -21,6 +22,17 @@ struct CanHostChardev {
     unsigned input_used, output_used;
     guint watch;
     bool opened, failed;
+    /*
+     * Frames from the peer occupy the bus for their nominal length at
+     * @bitrate in virtual time, one after another, and reach the bus at the
+     * end of the frame. A frame waiting for the bus stops further reads.
+     * bitrate=0 delivers each record immediately.
+     */
+    uint32_t bitrate;
+    qemu_can_frame pending;
+    bool has_pending;
+    int64_t bus_free;
+    QEMUTimer *timer;
 };
 
 static void can_chardev_flush(CanHostChardev *s);
@@ -118,7 +130,30 @@ static int can_chardev_can_read(void *opaque)
 {
     CanHostChardev *s = opaque;
 
-    return s->failed ? 0 : sizeof(s->input) - s->input_used;
+    return s->failed || s->has_pending ? 0 : sizeof(s->input) - s->input_used;
+}
+
+/* Nominal classical frame length in bits, without stuff bits, with IFS. */
+static unsigned can_chardev_frame_bits(const qemu_can_frame *frame)
+{
+    unsigned bits = frame->can_id & QEMU_CAN_EFF_FLAG ? 67 : 47;
+
+    if (!(frame->can_id & QEMU_CAN_RTR_FLAG)) {
+        bits += 8 * frame->can_dlc;
+    }
+    return bits;
+}
+
+static void can_chardev_deliver(void *opaque)
+{
+    CanHostChardev *s = opaque;
+
+    if (!s->has_pending) {
+        return;
+    }
+    s->has_pending = false;
+    can_bus_client_send(&s->parent.bus_client, &s->pending, 1);
+    qemu_chr_fe_accept_input(&s->chr);
 }
 
 static void can_chardev_read(void *opaque, const uint8_t *data, int size)
@@ -143,7 +178,16 @@ static void can_chardev_read(void *opaque, const uint8_t *data, int size)
         return;
     }
     memcpy(frame.data, s->input + 8, frame.can_dlc);
-    can_bus_client_send(&s->parent.bus_client, &frame, 1);
+    if (!s->bitrate) {
+        can_bus_client_send(&s->parent.bus_client, &frame, 1);
+        return;
+    }
+    s->bus_free = MAX(s->bus_free, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL)) +
+                  muldiv64(can_chardev_frame_bits(&frame),
+                           NANOSECONDS_PER_SECOND, s->bitrate);
+    s->pending = frame;
+    s->has_pending = true;
+    timer_mod(s->timer, s->bus_free);
 }
 
 static void can_chardev_event(void *opaque, QEMUChrEvent event)
@@ -163,6 +207,8 @@ static void can_chardev_event(void *opaque, QEMUChrEvent event)
                     s->input_used, s->output_used);
     }
     s->input_used = s->output_used = 0;
+    s->has_pending = false;
+    timer_del(s->timer);
     s->failed = false;
     s->opened = event == CHR_EVENT_OPENED;
 }
@@ -213,9 +259,20 @@ static void can_chardev_set(Object *obj, const char *value, Error **errp)
     s->chardev = g_strdup(value);
 }
 
+static void can_chardev_init(Object *obj)
+{
+    CanHostChardev *s = CAN_HOST_CHARDEV(obj);
+
+    s->bitrate = 500000;
+    s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, can_chardev_deliver, s);
+}
+
 static void can_chardev_finalize(Object *obj)
 {
-    g_free(CAN_HOST_CHARDEV(obj)->chardev);
+    CanHostChardev *s = CAN_HOST_CHARDEV(obj);
+
+    timer_free(s->timer);
+    g_free(s->chardev);
 }
 
 static void can_chardev_class_init(ObjectClass *klass, const void *data)
@@ -224,6 +281,9 @@ static void can_chardev_class_init(ObjectClass *klass, const void *data)
 
     object_class_property_add_str(klass, "chardev", can_chardev_get,
                                   can_chardev_set);
+    object_class_property_add_uint32_ptr(klass, "bitrate",
+                                         offsetof(CanHostChardev, bitrate),
+                                         OBJ_PROP_FLAG_READWRITE);
     chc->connect = can_chardev_connect;
     chc->disconnect = can_chardev_disconnect;
 }
@@ -232,6 +292,7 @@ static const TypeInfo can_chardev_info = {
     .parent = TYPE_CAN_HOST,
     .name = TYPE_CAN_HOST_CHARDEV,
     .instance_size = sizeof(CanHostChardev),
+    .instance_init = can_chardev_init,
     .instance_finalize = can_chardev_finalize,
     .class_init = can_chardev_class_init,
 };

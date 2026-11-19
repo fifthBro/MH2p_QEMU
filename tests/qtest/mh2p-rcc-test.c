@@ -3468,6 +3468,7 @@ static void dcan_wait_data(QTestState *s, uint32_t base, uint32_t expected)
     while (qtest_readl(s, base + 0x98) != expected &&
            g_get_monotonic_time() < deadline) {
         g_usleep(1000);
+        qtest_clock_step(s, 10000); /* peer frames take bus time */
     }
     g_assert_cmphex(qtest_readl(s, base + 0x98), ==, expected);
 }
@@ -3567,7 +3568,12 @@ static void test_dcan_chardev_peer(void)
     g_usleep(10000);
     g_assert_cmphex(qtest_readl(s, base + 0x98), ==, 0);
     g_assert_cmpint(write(peer, frame + 7, 9), ==, 9);
-    dcan_wait_data(s, base, 1);
+    /* 4 data bytes, standard ID: 79 bits at 500 kbit/s. */
+    g_usleep(10000);
+    qtest_clock_step(s, 157999);
+    g_assert_cmphex(qtest_readl(s, base + 0x98), ==, 0);
+    qtest_clock_step(s, 1);
+    g_assert_cmphex(qtest_readl(s, base + 0x98), ==, 1);
     qtest_writel(s, base + 0x120, 0x730001);
     g_assert_cmphex(qtest_readl(s, base + 0x130), ==, 0x00020000);
     qtest_writel(s, base + 0x120, 0x1c0001);
