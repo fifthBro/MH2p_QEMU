@@ -11,6 +11,7 @@
 #include "hw/ssi/ssi.h"
 #include "migration/vmstate.h"
 #include "net/can_emu.h"
+#include "trace.h"
 
 #define TYPE_TJA1145 "tja1145"
 OBJECT_DECLARE_SIMPLE_TYPE(TJA1145State, TJA1145)
@@ -18,7 +19,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(TJA1145State, TJA1145)
 struct TJA1145State {
     SSIPeripheral parent_obj;
     uint8_t registers[128];
-    uint8_t command, data[3];
+    uint8_t command, data[3], result[3];
     unsigned length;
     CanBusState *canbus;
     CanBusClientState bus_client;
@@ -123,6 +124,13 @@ static int tja1145_select(SSIPeripheral *dev, bool deselected)
     TJA1145State *s = TJA1145(dev);
 
     if (deselected && s->length) {
+        unsigned count = MIN(s->length - 1, 3);
+        uint32_t bytes = 0;
+
+        for (unsigned i = 0; i < count; i++) {
+            bytes |= (uint32_t)(s->command & 1 ? s->result[i] : s->data[i])
+                     << (8 * i);
+        }
         if (!(s->command & 1)) {
             if (s->length < 2 || s->length > 4) {
                 s->registers[0x61] |= 2;
@@ -133,6 +141,8 @@ static int tja1145_select(SSIPeripheral *dev, bool deselected)
                 }
             }
         }
+        trace_tja1145_transfer(s->command & 1, s->command >> 1, count, bytes,
+                               s->registers[1]);
         s->length = 0;
     }
     return 0;
@@ -147,6 +157,7 @@ static uint32_t tja1145_transfer(SSIPeripheral *dev, uint32_t value)
         s->command = value;
     } else if (s->length <= 3) {
         result = tja1145_read(s, (s->command >> 1) + s->length - 1);
+        s->result[s->length - 1] = result;
         s->data[s->length - 1] = value;
     } else if (s->command & 1) {
         /* Read transactions reflect SDI from clock 33 onward. */

@@ -67,3 +67,6 @@ allwinner_a10_spi_write(const char* regname, uint32_t value) "reg[%s] <= 0x%08x"
 tegra124_spi_read(uint64_t offset, uint32_t value) "offset 0x%03" PRIx64 " value 0x%08" PRIx32
 tegra124_spi_write(uint64_t offset, uint32_t value) "offset 0x%03" PRIx64 " value 0x%08" PRIx32
 tegra124_spi_transfer(uint32_t blocks, unsigned bits, uint32_t command1, uint32_t rx_count) "blocks %" PRIu32 " bits %u command1 0x%08" PRIx32 " rx %" PRIu32
+
+# tja1145.c
+tja1145_transfer(bool read, unsigned address, unsigned count, uint32_t bytes, unsigned mode) "read=%d addr=0x%x n=%u bytes=0x%x mode=%u"
