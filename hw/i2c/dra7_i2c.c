@@ -82,7 +82,14 @@ static void dra7_i2c_pump(DRA7I2CState *s)
             }
             s->count--;
         }
-        if (s->active && !s->count) {
+        /*
+         * A receive completes (ARDY, then STOP) only after the CPU has
+         * drained the RX FIFO: drivers stop reading DATA once ARDY is set,
+         * so asserting it with bytes still queued loses the tail of a
+         * transfer longer than the FIFO.
+         */
+        if (s->active && !s->count &&
+            ((s->control & TRX) || fifo8_is_empty(&s->rx))) {
             s->active = false;
             s->status |= ARDY;
             if (s->control & STP) {
@@ -141,10 +148,8 @@ static MemTxResult dra7_i2c_read(void *opaque, hwaddr offset,
         if (fifo8_is_empty(&s->rx)) {
             goto unsupported;
         }
+        /* I2C_DATA is 8 bits wide on DRA7: one byte per access of any size. */
         *value = fifo8_pop(&s->rx);
-        if (size > 1 && !fifo8_is_empty(&s->rx)) {
-            *value |= (uint32_t)fifo8_pop(&s->rx) << 8;
-        }
         dra7_i2c_pump(s);
         return MEMTX_OK;
     }
@@ -204,18 +209,14 @@ static MemTxResult dra7_i2c_write(void *opaque, hwaddr offset,
     DRA7I2CState *s = opaque;
 
     if (offset == 0x9c && (size == 1 || size == 2 || size == 4)) {
-        unsigned bytes = size == 1 ? 1 : 2;
-
-        if (fifo8_num_free(&s->tx) < bytes || !(s->control & I2C_EN)) {
+        /* I2C_DATA is 8 bits wide on DRA7: one byte per access of any size. */
+        if (fifo8_is_full(&s->tx) || !(s->control & I2C_EN)) {
             goto unsupported;
         }
         if (s->active && !(s->control & TRX)) {
             goto unsupported;
         }
         fifo8_push(&s->tx, value);
-        if (bytes == 2) {
-            fifo8_push(&s->tx, value >> 8);
-        }
         dra7_i2c_pump(s);
         return MEMTX_OK;
     }

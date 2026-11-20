@@ -2396,7 +2396,10 @@ static void test_i2c_real_slave_fifo_transfer(void)
     g_assert_cmphex(qtest_readl(s, base + 0x98), ==, 0);
     g_assert_cmphex(qtest_readl(s, base + 0xc0), ==, 0x4200);
     g_assert_true(qtest_get_irq(s, 56));
+    /* I2C_DATA is 8 bits: a 16-bit read still takes one byte from the FIFO. */
     g_assert_cmphex(qtest_readw(s, base + 0x9c), ==, 0x19);
+    g_assert_cmphex(qtest_readl(s, base + 0xc0), ==, 0x4100);
+    g_assert_cmphex(qtest_readl(s, base + 0x9c), ==, 0x00);
     g_assert_cmphex(qtest_readl(s, base + 0xc0), ==, 0x4000);
     g_assert_false(qtest_get_irq(s, 56));
 
@@ -2404,7 +2407,10 @@ static void test_i2c_real_slave_fifo_transfer(void)
     qtest_writel(s, base + 0xa4, 0x8603);
     qtest_writel(s, base + 0xa4, 0x8403); /* Cannot change an active direction. */
     g_assert_cmphex(qtest_readl(s, base + 0xa4), ==, 0x8602);
-    qtest_writew(s, base + 0x9c, 0x0101); /* TMP105 shutdown configuration. */
+    /* TMP105 shutdown configuration: pointer 1, value 1, one byte per access. */
+    qtest_writew(s, base + 0x9c, 0x01);
+    g_assert_cmphex(qtest_readl(s, base + 0x98), ==, 1);
+    qtest_writel(s, base + 0x9c, 0x01);
     g_assert_cmphex(qtest_readl(s, base + 0x98), ==, 0);
     qtest_writel(s, base + 0x98, 1);
     qtest_writel(s, base + 0xa4, 0x8601);
@@ -2420,8 +2426,9 @@ static void test_i2c_real_slave_fifo_transfer(void)
     qtest_writel(s, base + 0xa4, 0x8403);
     g_assert_cmphex(qtest_readl(s, base + 0xc0), ==, 0x5000);
     g_assert_cmphex(qtest_readl(s, base + 0x98), ==, 4);
-    for (unsigned i = 0; i < 10; i++) {
-        qtest_readw(s, base + 0x9c);
+    for (unsigned i = 0; i < 20; i++) {
+        g_assert_cmphex(qtest_readl(s, base + 0x24) & 4, ==, 0);
+        qtest_readw(s, base + 0x9c); /* One byte per read. */
     }
     g_assert_cmphex(qtest_readl(s, base + 0x98), ==, 0);
     g_assert_cmphex(qtest_readl(s, base + 0xc0), ==, 0x4000);
@@ -2533,10 +2540,12 @@ static void test_i2c_eeprom(void)
     qtest_writeb(s, base + 0x9c, 0x88);
     qtest_writel(s, base + 0x98, 16);
     qtest_writel(s, base + 0xa4, 0x8403);
-    g_assert_cmphex(qtest_readl(s, base + 0x24) & 6, ==, 4);
+    /* No NACK; ARDY only once the CPU has drained the RX FIFO. */
+    g_assert_cmphex(qtest_readl(s, base + 0x24) & 6, ==, 0);
     for (unsigned i = 0; i < 16; i++) {
         g_assert_cmphex(qtest_readb(s, base + 0x9c), ==, 0xa0 + i);
     }
+    g_assert_cmphex(qtest_readl(s, base + 0x24) & 6, ==, 4);
     qtest_system_reset(s);
     qtest_writel(s, 0x4a0097a8, 2);
     qtest_writel(s, base + 0xac, 0x50);
